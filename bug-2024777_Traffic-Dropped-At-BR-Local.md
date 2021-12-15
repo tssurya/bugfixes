@@ -1,6 +1,7 @@
 # Traffic Dropped at br-local
 
 BZ link: https://bugzilla.redhat.com/show_bug.cgi?id=2024777  
+Component: OVN-Kubernetes  
 OCP version: 4.6.17  
 OVN Version: 20.06.2-11.el8fdp.x86_64  
 OVS Version: 2.13.0-72.el8fdp.x86_64  
@@ -74,7 +75,7 @@ This did the trick and packets started flowing out of `ovn-k8s-gw0` into the wor
 
 ## Conclusion
 
-To find a proper fix, we tried to investigate who was wrongly programming the flows. We picked a specific node, deleted all flows on `br-local`. Then restarted the `ovnkube-node` and `ovn-controller` components. Rechecking the br-local flows, it was clear that they both weren't the culprits since no flows were added to `br-local`. We then rebooted the node and then saw the wrong flows getting re-added to `br-local` again which made OVS the suspect. Looking at the OVS openvswitchd logs, we saw:
+To find a proper fix, we tried to investigate who was wrongly programming the flows. We picked a specific node, deleted all flows on `br-local`. Then restarted the `ovnkube-node` and `ovn-controller` components. Rechecking the br-local flows, it was clear that they both weren't the culprits since no flows were added to `br-local`. We then rebooted the node and then saw the wrong flows getting re-added to `br-local` again which made something else running on the node, the suspect. Looking at the OVS openvswitchd logs, we saw:
 ```
 2021-11-19T16:24:32.448Z|00666|connmgr|INFO|br-local<->unix#3: 1 flow_mods in the last 0 s (1 deletes)
 2021-11-19T16:24:32.454Z|00667|connmgr|INFO|br-local<->unix#6: 2 flow_mods in the last 0 s (2 adds)
@@ -84,4 +85,11 @@ and checking unix 3 socket:
 unix  3      [ ]         STREAM     CONNECTED     940841   /var/run/openvswitch/db.sock
 ```
 
-Clearly ovs was programming the flows wrongly for some reason. It was deleting the `NORMAL` flow and adding two wrong flows. Unfortunately we didn't pursue the path of figuring out exactly why OVS was behaving strangely. Since this was an old OCP version and it didn't have a related fix for the NORMAL flow (https://github.com/openshift/ovn-kubernetes/commit/30a721deb57c73d3beae652431012ee784250871), we decided proceeding with upgrading to newer OCP version which would also solve this flow glitch would be the better option and if anything broken during upgrade, we could fix that.
+Clearly something was triggering an ovs-ofctl add-flow/del-flow and programming the flows wrongly for some reason. It was deleting the `NORMAL` flow and adding two wrong flows. We then realised that there was a machine-config-daemonset running on each node that was running a script which deleted all the flows on br-local and added these wrong flows - apparently this hack was needed in older OCP 4.4.5 versions:
+```
+/bin/ovs-ofctl del-flows br-local
+/bin/ovs-ofctl add-flows br-local -<<EOF
+table=0,priority=100,in_port=1,actions=output:2
+table=0,priority=100,in_port=2,actions=output:1
+```
+We deleted this MC from all the nodes and that fixed this issue. We then proceeded with upgrading to newer OCP version.
